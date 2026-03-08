@@ -25,10 +25,18 @@ app.add_middleware(
 
 # Initialize clients
 claude_client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
-supabase: Client = create_client(
-    os.getenv("SUPABASE_URL"),
-    os.getenv("SUPABASE_KEY")
-)
+
+# Supabase is optional (for conversation logging)
+try:
+    supabase: Client = create_client(
+        os.getenv("SUPABASE_URL"),
+        os.getenv("SUPABASE_KEY")
+    )
+    SUPABASE_ENABLED = True
+except Exception as e:
+    print(f"Warning: Supabase not available: {e}")
+    supabase = None
+    SUPABASE_ENABLED = False
 
 # Request/Response models
 class Message(BaseModel):
@@ -174,20 +182,21 @@ async def chat(request: ChatRequest):
             "i don't know"
         ])
         
-        # Save to database
+        # Save to database (optional)
         session_id = request.session_id or f"session_{datetime.now().timestamp()}"
         
-        try:
-            supabase.table("conversations").insert({
-                "session_id": session_id,
-                "user_message": request.message,
-                "bot_response": assistant_response,
-                "needs_human": needs_human,
-                "created_at": datetime.now().isoformat()
-            }).execute()
-        except Exception as db_error:
-            print(f"Database error: {db_error}")
-            # Don't fail the request if DB fails
+        if SUPABASE_ENABLED and supabase:
+            try:
+                supabase.table("conversations").insert({
+                    "session_id": session_id,
+                    "user_message": request.message,
+                    "bot_response": assistant_response,
+                    "needs_human": needs_human,
+                    "created_at": datetime.now().isoformat()
+                }).execute()
+            except Exception as db_error:
+                print(f"Database error: {db_error}")
+                # Don't fail the request if DB fails
         
         return ChatResponse(
             response=assistant_response,
@@ -206,12 +215,18 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "claude_api": "configured" if os.getenv("CLAUDE_API_KEY") else "missing",
-        "supabase": "configured" if os.getenv("SUPABASE_URL") else "missing"
+        "supabase": "enabled" if SUPABASE_ENABLED else "disabled (optional)"
     }
 
 @app.get("/stats")
 async def get_stats():
     """Get conversation stats"""
+    if not SUPABASE_ENABLED or not supabase:
+        return {
+            "total_conversations": 0,
+            "timestamp": datetime.now().isoformat(),
+            "note": "Database not connected"
+        }
     try:
         result = supabase.table("conversations").select("*", count="exact").execute()
         return {
